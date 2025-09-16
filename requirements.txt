@@ -1,0 +1,8 @@
+torch>=1.13
+numpy
+h5py
+Pillow
+torchvision
+matplotlib
+opencv-python
+scipy
