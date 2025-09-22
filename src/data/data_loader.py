@@ -79,7 +79,15 @@ def create_h5_from_mat(img_path, h5_path):
 
     try:
         mat = sio.loadmat(mat_path)
-        points = mat["image_info"][0, 0][0, 0][0]
+
+        # Handle different ShanghaiTech formats
+        try:
+            points = mat["image_info"][0, 0][0, 0][0]      # Part A
+        except Exception:
+            try:
+                points = mat["image_info"][0, 0][0, 0][0, 0]  # Part B
+            except Exception:
+                raise RuntimeError(f"Unsupported .mat structure in {mat_path}")
         
         if len(points) == 0:
             print(f"Warning: No points found in {mat_path}")
