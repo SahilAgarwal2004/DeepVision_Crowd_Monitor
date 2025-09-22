@@ -1,8 +1,12 @@
-torch>=1.13
-numpy
+opencv-python
 h5py
+numpy
 Pillow
+torch
 torchvision
 matplotlib
-opencv-python
 scipy
+tqdm
+wandb
+pyyaml
+
