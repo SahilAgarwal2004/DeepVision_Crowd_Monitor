@@ -205,7 +205,7 @@ def visualize_sample(dataset, idx=0):
 
 
 if __name__ == "__main__":
-    data_root = "Dataset/ShanghaiTech/part_A/train_data"
+    data_root = "../../Dataset/ShanghaiTech/part_A/train_data"
     
     # Create dataset
     transform = transforms.Compose([
@@ -216,4 +216,4 @@ if __name__ == "__main__":
     dataset = CrowdDataset(data_root, transform=transform)
     
     # Visualize sample only
-    visualize_sample(dataset, idx=0)
+    visualize_sample(dataset, idx=1)

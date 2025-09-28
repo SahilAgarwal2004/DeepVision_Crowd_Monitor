@@ -32,16 +32,17 @@ class CrowdCountingLoss(nn.Module):
 
 def calculate_mae(pred, target):
     """Calculate Mean Absolute Error in count"""
-    pred_count = pred.sum(dim=[2,3]).cpu().numpy()
-    target_count = target.sum(dim=[2,3]).cpu().numpy()
+    pred_count = pred.sum(dim=[2,3]).detach().cpu().numpy()
+    target_count = target.sum(dim=[2,3]).detach().cpu().numpy()
     return np.mean(np.abs(pred_count - target_count))
 
 
 class CrowdTrainer:
     def __init__(self, model, config):
-        self.model = model.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+        device = torch.device("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.model = model.to(device)
         self.config = config
-        self.device = self.model.device if hasattr(self.model, 'device') else next(self.model.parameters()).device
+        self.device = device
         
         # Setup training components
         self.criterion = CrowdCountingLoss()

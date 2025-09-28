@@ -3,12 +3,14 @@ import sys
 import yaml
 import torch
 import wandb
+from dotenv import load_dotenv
 from torchvision import transforms
+
+load_dotenv()
 
 from src.model.csrnet import CSRNet
 from src.data.data_loader import CrowdDataset
 from src.training.train import CrowdTrainer
-
 
 def load_config(path='config.yaml'):
     """Load YAML configuration file"""
@@ -24,6 +26,12 @@ def main():
     try:
         config = load_config()
         print("Config loaded")
+        
+        # Debug prints
+        print(f"Learning rate: {config['training']['learning_rate']}")
+        print(f"Learning rate type: {type(config['training']['learning_rate'])}")
+        print(f"Config training section: {config['training']}")
+        
     except FileNotFoundError:
         print("config.yaml not found in main folder!")
         return
@@ -36,6 +44,8 @@ def main():
         return
     
     print(f"Dataset found: {data_path}")
+
+    wandb.login(key=os.getenv('WANDB_API_KEY'))
     
     # Initialize WandB
     wandb.init(

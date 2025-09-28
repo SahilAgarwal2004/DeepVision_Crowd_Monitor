@@ -9,4 +9,5 @@ scipy
 tqdm
 wandb
 pyyaml
+python-dotenv
 

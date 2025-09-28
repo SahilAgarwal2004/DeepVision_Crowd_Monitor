@@ -9,15 +9,19 @@ model:
 data:
   root_dir: "Dataset/ShanghaiTech/part_B/train_data"
   image_size: [512, 512]
-  num_workers: 2
+  num_workers: 4
 
 # Training
 training:
-  batch_size: 6
+  batch_size: 2
   num_epochs: 75
-  learning_rate: 1e-5
-  weight_decay: 1e-4
+  learning_rate: !!float 1e-5
+  weight_decay: !!float 1e-4
   train_split: 0.8
+  device: "mps"
+  
+  mixed_precision: false  
+  gradient_accumulation: 2  
   
   loss:
     mse_weight: 1.0
@@ -32,3 +36,8 @@ logging:
     project: "crowd-density-part-b"
     entity: null
     log_interval: 10
+
+  optimization:
+  memory_efficient: true
+  pin_memory: false  # Not needed for MPS
+  persistent_workers: true
