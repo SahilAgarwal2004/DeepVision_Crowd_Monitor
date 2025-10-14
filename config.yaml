@@ -8,7 +8,7 @@ model:
 # Dataset
 data:
 
-  root_dir: "/content/drive/MyDrive/ShanghaiTech/part_B/train_data"
+  root_dir: "./data"
   image_size: [512, 512]
   num_workers: 2  
 
