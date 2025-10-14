@@ -18,7 +18,7 @@ def load_config(path='config.yaml'):
 
 
 def main():
-    print("DeepVision Crowd Monitor - Training (FIXED)")
+    print("DeepVision Crowd Monitor - Training")
     print("=" * 50)
     
     # Load config
