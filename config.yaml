@@ -1,4 +1,4 @@
-# DeepVision Crowd Monitor - Essential Configuration
+
 
 # Model
 model:
@@ -7,33 +7,38 @@ model:
 
 # Dataset
 data:
-  root_dir: "Dataset/ShanghaiTech/part_B/train_data"
+
+  root_dir: "/content/drive/MyDrive/ShanghaiTech/part_B/train_data"
   image_size: [512, 512]
-  num_workers: 2
+  num_workers: 2  
 
 # Training
 training:
-  batch_size: 4
+  batch_size: 8  #
   num_epochs: 50
-  learning_rate: !!float 5e-5
+  learning_rate: !!float 1e-6  
   weight_decay: !!float 5e-4
   train_split: 0.8
-  device: "mps"
+  device: "cuda" 
   
-  mixed_precision: false  
-  gradient_accumulation: 2  
+  mixed_precision: true  
+  gradient_accumulation: 1  
   
   loss:
     mse_weight: 1.0
     count_weight: 0.01
 
+  scheduler:
+    type: "step"  
+    step_size: 15
+    gamma: 0.3
+
 # Logging
 logging:
-  results_dir: "results"
+  results_dir: "results"  # Save to Drive to persist
   save_interval: 10
   
   wandb:
     project: "crowd-density"
-    entity: null
+    entity: "sahilagarwal19102004-upes"  # Set your wandb username if you have one
     log_interval: 5
-
