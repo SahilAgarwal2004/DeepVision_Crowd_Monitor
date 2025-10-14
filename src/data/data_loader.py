@@ -1,219 +1,121 @@
 import os
+import glob
 import cv2
-import h5py
 import numpy as np
-from PIL import Image
+import scipy.io as sio
 import torch
 from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-import matplotlib.pyplot as plt
-import scipy.io as sio
-from scipy.ndimage import gaussian_filter
-from scipy.spatial import KDTree
-
-
-def generate_density_map(img, points, k=3):
-    h, w = img.shape[:2]
-    density = np.zeros((h, w), dtype=np.float32)
-
-    if len(points) == 0:
-        return density
-
-    points = np.array(points)
-    if len(points.shape) == 1:
-        points = points.reshape(1, -1)
-    
-    # Filter valid points
-    valid_points = []
-    for pt in points:
-        x, y = int(pt[0]), int(pt[1])
-        if 0 <= x < w and 0 <= y < h:
-            valid_points.append([x, y])
-    
-    if len(valid_points) == 0:
-        return density
-        
-    valid_points = np.array(valid_points)
-    
-    # Calculate adaptive sigma
-    if len(valid_points) > k:
-        tree = KDTree(valid_points, leafsize=2048)
-        distances, _ = tree.query(valid_points, k=k+1)
-    
-    # Create density map
-    for i, pt in enumerate(valid_points):
-        x, y = int(pt[0]), int(pt[1])
-        
-        if len(valid_points) > k:
-            sigma = max(2.0, min(np.mean(distances[i][1:]) * 0.3, 15.0))
-        else:
-            sigma = max(3.0, min(h, w) / 20.0)
-        
-        temp_density = np.zeros((h, w), dtype=np.float32)
-        temp_density[y, x] = 1.0
-        temp_density = gaussian_filter(temp_density, sigma=sigma, mode="constant")
-        density += temp_density
-
-    return density
-
-
-def create_h5_from_mat(img_path, h5_path):
-
-    img_name = os.path.basename(img_path).replace(".jpg", "")
-    
-    # Try different possible locations for MAT files
-    possible_paths = [
-        os.path.join(os.path.dirname(h5_path), f"GT_{img_name}.mat"),
-        os.path.join(os.path.dirname(os.path.dirname(h5_path)), "ground_truth", f"GT_{img_name}.mat"),
-        os.path.join(os.path.dirname(img_path).replace("images", "ground_truth"), f"GT_{img_name}.mat")
-    ]
-    
-    mat_path = None
-    for path in possible_paths:
-        if os.path.exists(path):
-            mat_path = path
-            break
-    
-    if mat_path is None:
-        raise FileNotFoundError(f"Ground truth file not found for {img_name}")
-
-    try:
-        mat = sio.loadmat(mat_path)
-
-        # Handle different ShanghaiTech formats
-        try:
-            points = mat["image_info"][0, 0][0, 0][0]      # Part A
-        except Exception:
-            try:
-                points = mat["image_info"][0, 0][0, 0][0, 0]  # Part B
-            except Exception:
-                raise RuntimeError(f"Unsupported .mat structure in {mat_path}")
-        
-        if len(points) == 0:
-            print(f"Warning: No points found in {mat_path}")
-            
-        img = cv2.imread(img_path)
-        if img is None:
-            raise ValueError(f"Could not load image: {img_path}")
-            
-        density = generate_density_map(img, points)
-        
-        with h5py.File(h5_path, "w") as hf:
-            hf["density"] = density
-
-        return density
-    except Exception as e:
-        raise RuntimeError(f"Error processing {img_name}: {str(e)}")
-
+from PIL import Image
 
 class CrowdDataset(Dataset):
+    """
+    Fixed CrowdDataset using simple normalization (matches working code)
+    No H5 files, no ImageNet normalization, no complex augmentation
+    """
     def __init__(self, root_dir, transform=None):
+        """
+        Args:
+            root_dir: Path to train_data or test_data folder
+            transform: IGNORED - kept for API compatibility
+        """
         self.root_dir = root_dir
+        self.image_size = (512, 512)  # Fixed size
+        self.sigma = 4  # Gaussian sigma
+        
+        # Load image paths
         images_dir = os.path.join(root_dir, "images")
         if not os.path.exists(images_dir):
             raise FileNotFoundError(f"Images directory not found: {images_dir}")
-            
-        self.image_paths = [
-            os.path.join(images_dir, img)
-            for img in os.listdir(images_dir)
-            if img.lower().endswith((".jpg", ".jpeg", ".png"))
-        ]
+        
+        self.image_paths = sorted(
+            glob.glob(os.path.join(images_dir, "*.jpg")) +
+            glob.glob(os.path.join(images_dir, "*.png"))
+        )
         
         if len(self.image_paths) == 0:
             raise ValueError(f"No valid images found in {images_dir}")
-            
-        self.transform = transform
-        print(f"Found {len(self.image_paths)} images in dataset")
+        
+        self.gt_dir = os.path.join(root_dir, "ground-truth")
+        
+        print(f"Found {len(self.image_paths)} images in {images_dir}")
+        print(f"Ground truth directory: {self.gt_dir}")
 
     def __len__(self):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
+        # Load and resize image
         img_path = self.image_paths[idx]
-        image = Image.open(img_path).convert("RGB")
-
-        img_name = os.path.basename(img_path).replace(".jpg", "")
-        h5_path = os.path.join(self.root_dir, "ground-truth", f"{img_name}.h5")
-
-        if not os.path.exists(h5_path):
-            target = create_h5_from_mat(img_path, h5_path)
-        else:
-            with h5py.File(h5_path, "r") as hf:
-                target = np.asarray(hf["density"]).astype(np.float32)
-
-
-        old_sum = target.sum()
-        target_resized = cv2.resize(target, (512, 512), interpolation=cv2.INTER_CUBIC)
-        if target_resized.sum() > 0:
-            target_resized *= (old_sum / target_resized.sum())
+        img = cv2.imread(img_path)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
-        target = torch.tensor(target_resized, dtype=torch.float32)
-
-        if self.transform:
-            image = self.transform(image)
-
-        return image, target
+        original_h, original_w = img.shape[:2]
+        img = cv2.resize(img, self.image_size)
+        
+        # Load ground truth points
+        base_name = os.path.splitext(os.path.basename(img_path))[0]
+        gt_path = os.path.join(self.gt_dir, f"GT_{base_name}.mat")
+        
+        if not os.path.exists(gt_path):
+            gt_path = os.path.join(self.gt_dir, f"{base_name}.mat")
+        
+        points = np.zeros((0, 2))
+        if os.path.exists(gt_path):
+            try:
+                mat = sio.loadmat(gt_path)
+                # Try different formats
+                try:
+                    points = np.array(mat["image_info"][0, 0][0, 0][0], dtype=np.float32)
+                except:
+                    try:
+                        points = np.array(mat["image_info"][0, 0][0, 0][0, 0], dtype=np.float32)
+                    except Exception as e:
+                        print(f"[WARN] Could not parse {gt_path}: {e}")
+            except Exception as e:
+                print(f"[WARN] Could not load {gt_path}: {e}")
+        
+        # Scale points to resized image
+        if points.size > 0:
+            points[:, 0] = points[:, 0] * (self.image_size[1] / original_w)
+            points[:, 1] = points[:, 1] * (self.image_size[0] / original_h)
+        
+        # Generate simple density map
+        density_map = np.zeros(self.image_size, dtype=np.float32)
+        
+        for point in points:
+            x = int(round(point[0]))
+            y = int(round(point[1]))
+            if 0 <= x < self.image_size[1] and 0 <= y < self.image_size[0]:
+                density_map[y, x] += 1
+        
+        # Apply Gaussian blur (simple, fixed sigma)
+        if density_map.sum() > 0:
+            kernel_size = self.sigma * 4 + 1
+            density_map = cv2.GaussianBlur(
+                density_map,
+                (kernel_size, kernel_size),
+                self.sigma
+            )
+        
+        # Image as tensor (0-1 range)
+        img_tensor = torch.from_numpy(img.astype('float32') / 255.0)
+        img_tensor = img_tensor.permute(2, 0, 1)  # HWC -> CHW
+        
+        # Density map as tensor 
+        density_tensor = torch.from_numpy(density_map).float()
+        
+        return img_tensor, density_tensor
 
 
 def get_dataloader(root_dir, batch_size=8, shuffle=True, num_workers=2):
-    transform = transforms.Compose([
-        transforms.Resize((512, 512)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-    dataset = CrowdDataset(root_dir, transform=transform)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
-
-
-def visualize_sample(dataset, idx=0):
-    image, density = dataset[idx]
-    
-    # Denormalize image
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-    img_disp = (image * std + mean).permute(1, 2, 0).clamp(0, 1).numpy()
-    
-    # Process density map
-    density_np = density.numpy()
-    if density_np.max() > 0:
-        density_vis = np.power(density_np / density_np.max(), 0.4)
-    else:
-        density_vis = density_np
-    
-    # Create visualization
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    
-    # Original image
-    axes[0].imshow(img_disp)
-    axes[0].set_title('Original Image')
-    axes[0].axis('off')
-    
-    # Density map
-    im = axes[1].imshow(density_vis, cmap='hot', interpolation='bilinear')
-    axes[1].set_title(f'Density Map (Count: {density_np.sum():.1f})')
-    axes[1].axis('off')
-    plt.colorbar(im, ax=axes[1], shrink=0.7)
-    
-    # Overlay
-    axes[2].imshow(img_disp)
-    axes[2].imshow(density_vis, cmap='jet', alpha=0.6, interpolation='bilinear')
-    axes[2].set_title('Overlay')
-    axes[2].axis('off')
-    
-    plt.tight_layout()
-    plt.show()
-
-
-if __name__ == "__main__":
-    data_root = "../../Dataset/ShanghaiTech/part_A/train_data"
-    
-    # Create dataset
-    transform = transforms.Compose([
-        transforms.Resize((512, 512)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-    dataset = CrowdDataset(data_root, transform=transform)
-    
-    # Visualize sample only
-    visualize_sample(dataset, idx=1)
+    """
+    Create dataloader with fixed preprocessing
+    """
+    dataset = CrowdDataset(root_dir, transform=None)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=False  
+    )

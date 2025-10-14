@@ -4,11 +4,31 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import random_split
+from torch.utils.data import random_split, Subset
 import numpy as np
 import wandb
 from tqdm import tqdm
 from datetime import datetime
+import gc
+
+
+def get_optimal_device():
+    """Get the best available device"""
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    elif torch.cuda.is_available():
+        return torch.device("cuda")
+    else:
+        return torch.device("cpu")
+
+
+def clear_memory():
+    """Clear memory cache"""
+    gc.collect()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+    elif torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 class CrowdCountingLoss(nn.Module):
@@ -39,51 +59,100 @@ def calculate_mae(pred, target):
 
 class CrowdTrainer:
     def __init__(self, model, config):
-        device = torch.device("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
-        self.model = model.to(device)
+        # Get optimal device
+        self.device = get_optimal_device()
+        self.model = model.to(self.device)
         self.config = config
-        self.device = device
         
-        # Setup training components
-        self.criterion = CrowdCountingLoss()
-        param_groups = model.get_parameter_groups(
-            lr_frontend=config['training']['learning_rate'] * 0.1,
-            lr_backend=config['training']['learning_rate']
-        )
-        self.optimizer = optim.Adam(param_groups, weight_decay=config['training']['weight_decay'])
-        self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=20, gamma=0.5)
+        print(f"Device: {self.device}")
+        
+        # Setup training components with updated count_weight
+        self.criterion = CrowdCountingLoss(count_weight=config['training']['loss']['count_weight'])
+        
+        # Check if model has get_parameter_groups method
+        if hasattr(model, 'get_parameter_groups'):
+            param_groups = model.get_parameter_groups(
+                lr_frontend=config['training']['learning_rate'] * 0.1,
+                lr_backend=config['training']['learning_rate']
+            )
+            self.optimizer = optim.Adam(param_groups, weight_decay=config['training']['weight_decay'])
+        else:
+            self.optimizer = optim.Adam(
+                model.parameters(), 
+                lr=config['training']['learning_rate'],
+                weight_decay=config['training']['weight_decay']
+            )
+        
+        # Setup scheduler - check if cosine scheduler is specified
+        if 'scheduler' in config['training'] and config['training']['scheduler']['type'] == 'cosine':
+            self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer, 
+                T_max=config['training']['scheduler']['T_max'],
+                eta_min=config['training']['scheduler']['eta_min']
+            )
+            print("Using CosineAnnealingLR scheduler")
+        else:
+            self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=15, gamma=0.3)
+            print("Using StepLR scheduler")
         
         # Results directory
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.results_dir = os.path.join(config['logging']['results_dir'], f"csrnet_{timestamp}")
         os.makedirs(self.results_dir, exist_ok=True)
         
+        # Early stopping
         self.best_mae = float('inf')
-        print(f"🚀 Trainer ready | Device: {self.device} | Params: {sum(p.numel() for p in model.parameters()):,}")
+        self.patience = 15  # Stop if no improvement for 15 epochs
+        self.patience_counter = 0
+        
+        print(f"Trainer ready | Device: {self.device} | Params: {sum(p.numel() for p in model.parameters()):,}")
     
-    def setup_data(self, dataset_class, transform):
-        """Split dataset and create loaders"""
-        full_dataset = dataset_class(self.config['data']['root_dir'], transform=transform)
+    def setup_data(self, dataset_class, train_transform, val_transform=None):
+        """Split dataset and create loaders with separate transforms"""
+        if val_transform is None:
+            val_transform = train_transform
+        
+        # Load full dataset without transform first
+        full_dataset_indices = dataset_class(self.config['data']['root_dir'], transform=None)
         
         # Train/val split
-        train_size = int(self.config['training']['train_split'] * len(full_dataset))
-        val_size = len(full_dataset) - train_size
-        self.train_dataset, self.val_dataset = random_split(
-            full_dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42)
+        train_size = int(self.config['training']['train_split'] * len(full_dataset_indices))
+        val_size = len(full_dataset_indices) - train_size
+        
+        train_indices_split, val_indices_split = random_split(
+            range(len(full_dataset_indices)), [train_size, val_size], 
+            generator=torch.Generator().manual_seed(42)
         )
         
-        # Data loaders
+        # Create separate datasets with appropriate transforms
+        train_dataset_full = dataset_class(self.config['data']['root_dir'], transform=train_transform)
+        val_dataset_full = dataset_class(self.config['data']['root_dir'], transform=val_transform)
+        
+        self.train_dataset = Subset(train_dataset_full, train_indices_split.indices)
+        self.val_dataset = Subset(val_dataset_full, val_indices_split.indices)
+        
+        # Data loaders - optimized for M2/MPS
         from torch.utils.data import DataLoader
         self.train_loader = DataLoader(
-            self.train_dataset, batch_size=self.config['training']['batch_size'],
-            shuffle=True, num_workers=self.config['data']['num_workers'], pin_memory=True
+            self.train_dataset, 
+            batch_size=self.config['training']['batch_size'],
+            shuffle=True, 
+            num_workers=self.config['data']['num_workers'], 
+            pin_memory=False,  # Not needed for MPS
+            persistent_workers=True if self.config['data']['num_workers'] > 0 else False,
+            prefetch_factor=2 if self.config['data']['num_workers'] > 0 else None
         )
         self.val_loader = DataLoader(
-            self.val_dataset, batch_size=self.config['training']['batch_size'],
-            shuffle=False, num_workers=self.config['data']['num_workers'], pin_memory=True
+            self.val_dataset, 
+            batch_size=self.config['training']['batch_size'],
+            shuffle=False, 
+            num_workers=self.config['data']['num_workers'], 
+            pin_memory=False,  # Not needed for MPS
+            persistent_workers=True if self.config['data']['num_workers'] > 0 else False,
+            prefetch_factor=2 if self.config['data']['num_workers'] > 0 else None
         )
         
-        print(f"📊 Dataset: {len(self.train_dataset)} train, {len(self.val_dataset)} val")
+        print(f"Dataset: {len(self.train_dataset)} train, {len(self.val_dataset)} val")
     
     def train_epoch(self, epoch):
         """Single training epoch"""
@@ -92,7 +161,8 @@ class CrowdTrainer:
         
         pbar = tqdm(self.train_loader, desc=f'Train {epoch+1}/{self.config["training"]["num_epochs"]}')
         for batch_idx, (images, targets) in enumerate(pbar):
-            images, targets = images.to(self.device), targets.unsqueeze(1).to(self.device)
+            images = images.to(self.device, non_blocking=True)
+            targets = targets.unsqueeze(1).to(self.device, non_blocking=True)
             
             # Forward + backward
             self.optimizer.zero_grad()
@@ -120,6 +190,10 @@ class CrowdTrainer:
                     'train/lr': self.optimizer.param_groups[0]['lr'],
                     'epoch': epoch + 1
                 })
+            
+            # Clear memory periodically
+            if batch_idx % 20 == 0:
+                clear_memory()
         
         return total_loss / count, total_mae / count
     
@@ -130,7 +204,8 @@ class CrowdTrainer:
         
         with torch.no_grad():
             for batch_idx, (images, targets) in enumerate(tqdm(self.val_loader, desc=f'Val {epoch+1}')):
-                images, targets = images.to(self.device), targets.unsqueeze(1).to(self.device)
+                images = images.to(self.device, non_blocking=True)
+                targets = targets.unsqueeze(1).to(self.device, non_blocking=True)
                 
                 outputs = self.model(images)
                 loss = self.criterion(outputs, targets)
@@ -149,18 +224,22 @@ class CrowdTrainer:
                     img_denorm = (img * std + mean).clamp(0, 1)
                     
                     # Get density maps
-                    pred_map = outputs[0, 0].detach().cpu()  # Remove batch and channel dims
+                    pred_map = outputs[0, 0].detach().cpu()
                     gt_map = targets[0, 0].detach().cpu()
                     
-                    # Normalize for better visualization
+                    # Normalize for better visualization and convert to uint8
                     pred_vis = pred_map / (pred_map.max() + 1e-8)
                     gt_vis = gt_map / (gt_map.max() + 1e-8)
+                    
+                    # Convert to numpy and scale to [0, 255] for WandB
+                    pred_vis_np = (pred_vis.numpy() * 255).astype('uint8')
+                    gt_vis_np = (gt_vis.numpy() * 255).astype('uint8')
                     
                     wandb.log({
                         "examples": [
                             wandb.Image(img_denorm, caption="Input Image"),
-                            wandb.Image(pred_vis, caption=f"Predicted (Count: {pred_map.sum():.1f})"),
-                            wandb.Image(gt_vis, caption=f"Ground Truth (Count: {gt_map.sum():.1f})")
+                            wandb.Image(pred_vis_np, caption=f"Predicted (Count: {pred_map.sum():.1f})"),
+                            wandb.Image(gt_vis_np, caption=f"Ground Truth (Count: {gt_map.sum():.1f})")
                         ],
                         "epoch": epoch + 1
                     })
@@ -182,7 +261,7 @@ class CrowdTrainer:
             print(f"New best model! MAE: {self.best_mae:.2f}")
     
     def train(self):
-        """Main training loop"""
+        """Main training loop with early stopping"""
         print(f"Training for {self.config['training']['num_epochs']} epochs")
         start_time = time.time()
         
@@ -193,10 +272,18 @@ class CrowdTrainer:
             
             self.scheduler.step()
             
-            # Save best model
+            # Save best model and check early stopping
             if val_mae < self.best_mae:
                 self.best_mae = val_mae
+                self.patience_counter = 0
                 self.save_model(epoch, is_best=True)
+            else:
+                self.patience_counter += 1
+            
+            # Check early stopping
+            if self.patience_counter >= self.patience:
+                print(f"\nEarly stopping at epoch {epoch+1} - no improvement for {self.patience} epochs")
+                break
             
             # Log to wandb
             wandb.log({
@@ -209,10 +296,15 @@ class CrowdTrainer:
             })
             
             # Print results
+            elapsed = (time.time() - start_time) / 3600
             print(f"Epoch {epoch+1:3d} | Train: {train_loss:.4f}/{train_mae:.1f} | "
-                  f"Val: {val_loss:.4f}/{val_mae:.1f} | Best: {self.best_mae:.1f}")
+                  f"Val: {val_loss:.4f}/{val_mae:.1f} | Best: {self.best_mae:.1f} | "
+                  f"Patience: {self.patience_counter}/{self.patience} | {elapsed:.1f}h")
+            
+            # Clear memory after epoch
+            clear_memory()
         
         total_time = time.time() - start_time
-        print(f"Training done! Best MAE: {self.best_mae:.2f} in {total_time/3600:.1f}h")
+        print(f"\nTraining done! Best MAE: {self.best_mae:.2f} in {total_time/3600:.1f}h")
         
         return self.best_mae

@@ -4,7 +4,6 @@ import yaml
 import torch
 import wandb
 from dotenv import load_dotenv
-from torchvision import transforms
 
 load_dotenv()
 
@@ -19,59 +18,49 @@ def load_config(path='config.yaml'):
 
 
 def main():
-    print("DeepVision Crowd Monitor - Training")
+    print("DeepVision Crowd Monitor - Training (FIXED)")
     print("=" * 50)
     
     # Load config
     try:
         config = load_config()
-        print("Config loaded")
-        
-        # Debug prints
-        print(f"Learning rate: {config['training']['learning_rate']}")
-        print(f"Learning rate type: {type(config['training']['learning_rate'])}")
-        print(f"Config training section: {config['training']}")
-        
+        print(" Config loaded")
+        print(f"  Learning rate: {config['training']['learning_rate']}")
     except FileNotFoundError:
-        print("config.yaml not found in main folder!")
+        print(" config.yaml not found!")
         return
     
     # Check dataset
     data_path = config['data']['root_dir']
     if not os.path.exists(data_path):
-        print(f"Dataset not found: {data_path}")
-        print("Update the path in config.yaml")
+        print(f" Dataset not found: {data_path}")
         return
     
-    print(f"Dataset found: {data_path}")
+    print(f"✓ Dataset found: {data_path}")
 
-    wandb.login(key=os.getenv('WANDB_API_KEY'))
-    
     # Initialize WandB
+    wandb.login(key=os.getenv('WANDB_API_KEY'))
     wandb.init(
         project=config['logging']['wandb']['project'],
         entity=config['logging']['wandb']['entity'],
         config=config,
-        name="csrnet_training"
+        name="csrnet_training_fixed"
     )
     print(" WandB initialized")
     
     # Create model
     model = CSRNet(pretrained=config['model']['pretrained'])
-    print(f"CSRNet model created")
+    print(f" CSRNet model created")
     
     # Create trainer
     trainer = CrowdTrainer(model, config)
     
-    # Setup data transforms
-    transform = transforms.Compose([
-        transforms.Resize(config['data']['image_size']),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
+    
+    train_transform = None
+    val_transform = None
     
     # Setup dataset
-    trainer.setup_data(CrowdDataset, transform)
+    trainer.setup_data(CrowdDataset, train_transform, val_transform)
     
     # Start training
     try:
@@ -80,11 +69,11 @@ def main():
         best_mae = trainer.train()
         
         print("\n Training Complete!")
-        print(f" Best MAE: {best_mae:.2f}")
+        print(f"  Best MAE: {best_mae:.2f}")
         wandb.finish()
         
     except KeyboardInterrupt:
-        print("\n Training stopped by user")
+        print("\n  Training stopped by user")
         wandb.finish()
     except Exception as e:
         print(f"\n Training failed: {e}")
