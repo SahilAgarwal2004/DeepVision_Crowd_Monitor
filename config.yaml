@@ -35,10 +35,10 @@ training:
 
 # Logging
 logging:
-  results_dir: "results"  # Save to Drive to persist
+  results_dir: "results"  
   save_interval: 10
   
   wandb:
     project: "crowd-density"
-    entity: "sahilagarwal19102004-upes"  # Set your wandb username if you have one
+    entity: "sahilagarwal19102004-upes"  
     log_interval: 5
